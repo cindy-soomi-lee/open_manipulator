@@ -16,6 +16,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   control_msgs
   control_toolbox
   controller_interface
+  geometry_msgs
   generate_parameter_library
   hardware_interface
   kdl_parser
@@ -70,6 +71,7 @@ ament_target_dependencies(gravity_compensation_controller
   control_msgs
   control_toolbox
   angles
+  geometry_msgs
   kdl_parser
   orocos_kdl_vendor
   rclcpp

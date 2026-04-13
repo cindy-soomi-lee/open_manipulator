@@ -23,6 +23,7 @@
 #define GRAVITY_COMPENSATION_CONTROLLER__GRAVITY_COMPENSATION_CONTROLLER_HPP_
 
 #include <atomic>
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,6 +32,7 @@
 #include "gravity_compensation_controller/visibility_control.h"
 
 #include "std_msgs/msg/bool.hpp"
+#include "geometry_msgs/msg/wrench_stamped.hpp"
 #include <controller_interface/controller_interface.hpp>
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -138,11 +140,15 @@ protected:
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr follower_joint_state_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr collision_flag_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr external_wrench_sub_;
   realtime_tools::RealtimeBuffer<bool> collision_flag_buffer_;
+  realtime_tools::RealtimeBuffer<std::array<double, 6>> external_wrench_buffer_;
   bool joint_index_initialized_ = false;
   std::vector<int> joint_name_to_index_;
   realtime_tools::RealtimeBuffer<std::vector<double>> follower_joint_positions_buffer_;
   std::atomic<bool> has_follower_data_{false};
+  std::atomic<bool> has_external_wrench_data_{false};
+  bool external_wrench_segment_valid_{false};
 };
 }  // namespace gravity_compensation_controller
 

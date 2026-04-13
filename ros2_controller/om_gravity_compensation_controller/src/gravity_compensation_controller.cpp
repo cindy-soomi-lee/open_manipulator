@@ -13,7 +13,9 @@
 // limitations under the License.
 
 #include <gravity_compensation_controller/gravity_compensation_controller.hpp>
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <string>
 #include <stdexcept>
 #include <rclcpp/rclcpp.hpp>
@@ -93,6 +95,29 @@ controller_interface::return_type GravityCompensationController::update(
     q(i) = joint_positions_[i];
     q_dot(i) = joint_velocities_[i];
     q_ddot(i) = joint_accelerations[i];
+  }
+
+  f_ext_.clear();
+  if (params_.enable_external_wrench && external_wrench_segment_valid_ && has_external_wrench_data_) {
+    auto wrench_ptr = external_wrench_buffer_.readFromRT();
+    if (wrench_ptr) {
+      double fx = (*wrench_ptr)[0] * params_.external_wrench_force_scale;
+      double fy = (*wrench_ptr)[1] * params_.external_wrench_force_scale;
+      double fz = (*wrench_ptr)[2] * params_.external_wrench_force_scale;
+      double tx = (*wrench_ptr)[3] * params_.external_wrench_torque_scale;
+      double ty = (*wrench_ptr)[4] * params_.external_wrench_torque_scale;
+      double tz = (*wrench_ptr)[5] * params_.external_wrench_torque_scale;
+
+      if (std::abs(fx) < params_.external_wrench_force_deadband) {fx = 0.0;}
+      if (std::abs(fy) < params_.external_wrench_force_deadband) {fy = 0.0;}
+      if (std::abs(fz) < params_.external_wrench_force_deadband) {fz = 0.0;}
+      if (std::abs(tx) < params_.external_wrench_torque_deadband) {tx = 0.0;}
+      if (std::abs(ty) < params_.external_wrench_torque_deadband) {ty = 0.0;}
+      if (std::abs(tz) < params_.external_wrench_torque_deadband) {tz = 0.0;}
+
+      f_ext_[params_.external_wrench_segment] = KDL::Wrench(
+        KDL::Vector(fx, fy, fz), KDL::Vector(tx, ty, tz));
+    }
   }
 
   // Compute torques
@@ -211,6 +236,7 @@ controller_interface::CallbackReturn GravityCompensationController::on_configure
   previous_velocities_.resize(n_joints_);  // Initialize previous velocities vector
   joint_name_to_index_.resize(joint_names_.size(), -1);
   tmp_positions_.resize(joint_names_.size(), 0.0);
+  external_wrench_buffer_.writeFromNonRT(std::array<double, 6>{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}});
 
   follower_joint_state_sub_ = get_node()->create_subscription<sensor_msgs::msg::JointState>(
     "/joint_states", rclcpp::QoS(10),
@@ -253,6 +279,23 @@ controller_interface::CallbackReturn GravityCompensationController::on_configure
       collision_flag_buffer_.writeFromNonRT(msg->data);
     });
 
+  if (params_.enable_external_wrench) {
+    external_wrench_sub_ = get_node()->create_subscription<geometry_msgs::msg::WrenchStamped>(
+      params_.external_wrench_topic, rclcpp::QoS(10),
+      [this](const geometry_msgs::msg::WrenchStamped::SharedPtr msg) {
+        std::array<double, 6> wrench = {{
+          msg->wrench.force.x,
+          msg->wrench.force.y,
+          msg->wrench.force.z,
+          msg->wrench.torque.x,
+          msg->wrench.torque.y,
+          msg->wrench.torque.z
+        }};
+        external_wrench_buffer_.writeFromNonRT(wrench);
+        has_external_wrench_data_ = true;
+      });
+  }
+
   if (params_.joints.empty()) {
     // TODO(destogl): is this correct? Can we really move-on if no joint names are not provided?
     RCLCPP_WARN(logger, "'joints' parameter is empty.");
@@ -287,6 +330,16 @@ controller_interface::CallbackReturn GravityCompensationController::on_configure
     RCLCPP_INFO(get_node()->get_logger(), "Successfully parsed the robot description.");
 
     q_ddot_.resize(tree_.getNrOfJoints());
+
+    external_wrench_segment_valid_ =
+      tree_.getSegments().find(params_.external_wrench_segment) != tree_.getSegments().end();
+    if (params_.enable_external_wrench && !external_wrench_segment_valid_) {
+      RCLCPP_ERROR(
+        get_node()->get_logger(),
+        "external_wrench_segment '%s' is not in the parsed KDL tree.",
+        params_.external_wrench_segment.c_str());
+      return CallbackReturn::ERROR;
+    }
   } else {
     // empty URDF is used for some tests
     RCLCPP_DEBUG(get_node()->get_logger(), "No URDF file given");

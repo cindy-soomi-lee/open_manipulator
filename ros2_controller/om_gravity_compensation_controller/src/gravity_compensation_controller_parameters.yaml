@@ -84,3 +84,38 @@ gravity_compensation_controller:
     default_value: false,
     description: "Enable additional spring effect on joint 2"
   }
+  enable_external_wrench: {
+    type: bool,
+    default_value: false,
+    description: "Enable external wrench input for force reflection"
+  }
+  external_wrench_topic: {
+    type: string,
+    default_value: "/omy/external_wrench",
+    description: "Topic for geometry_msgs/WrenchStamped used as external wrench input"
+  }
+  external_wrench_segment: {
+    type: string,
+    default_value: "link6",
+    description: "KDL segment name where external wrench is applied"
+  }
+  external_wrench_force_scale: {
+    type: double,
+    default_value: 1.0,
+    description: "Scale factor applied to force components of external wrench"
+  }
+  external_wrench_torque_scale: {
+    type: double,
+    default_value: 1.0,
+    description: "Scale factor applied to torque components of external wrench"
+  }
+  external_wrench_force_deadband: {
+    type: double,
+    default_value: 0.0,
+    description: "Deadband for force components in N"
+  }
+  external_wrench_torque_deadband: {
+    type: double,
+    default_value: 0.0,
+    description: "Deadband for torque components in Nm"
+  }
