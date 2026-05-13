@@ -56,7 +56,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'port_name',
-            default_value='/dev/ttyUSB0',
+            default_value='/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAK89CW-if00-port0',
             description='Port name for hardware connection.',
         ),
         DeclareLaunchArgument(
