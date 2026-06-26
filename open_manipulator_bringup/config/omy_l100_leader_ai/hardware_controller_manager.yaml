@@ -54,10 +54,10 @@
       enable_external_wrench: true
       external_wrench_topic: /omy/external_wrench
       external_wrench_segment: link6
-      external_wrench_force_scale: 0.12
-      external_wrench_torque_scale: 0.01
-      external_wrench_force_deadband: 0.6
-      external_wrench_torque_deadband: 0.08
+      external_wrench_force_scale: 1.0
+      external_wrench_torque_scale: 1.0
+      external_wrench_force_deadband: 0.2
+      external_wrench_torque_deadband: 0.02
       # enable_spring_effect: false
 
 /**:
