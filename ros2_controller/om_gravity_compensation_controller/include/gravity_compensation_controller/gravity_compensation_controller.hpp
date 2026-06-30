@@ -24,7 +24,9 @@
 
 #include <atomic>
 #include <array>
+#include <fstream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <map>
@@ -43,6 +45,9 @@
 #include <kdl_parser/kdl_parser.hpp>
 #include <kdl/frames.hpp>
 #include <kdl/jntarray.hpp>
+#include <kdl/jacobian.hpp>
+#include <kdl/chain.hpp>
+#include <kdl/chainjnttojacsolver.hpp>
 #include <kdl/tree.hpp>
 #include <kdl/treeidsolver_recursive_newton_euler.hpp>
 #include <om_gravity_compensation_controller/gravity_compensation_controller_parameters.hpp>
@@ -95,7 +100,25 @@ public:
     const rclcpp_lifecycle::State & previous_state) override;
 
 protected:
+  struct ExternalWrenchSample
+  {
+    std::array<double, 6> wrench{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+    double received_ros_time_s{0.0};
+    double msg_stamp_ros_time_s{0.0};
+    bool has_msg_stamp{false};
+  };
+
   std::string formatVector(const std::vector<double> & vec);
+  bool initialize_force_feedback_telemetry();
+  void close_force_feedback_telemetry();
+  std::string resolve_force_feedback_telemetry_path() const;
+  void log_force_feedback_telemetry(
+    double ros_time_s,
+    const ExternalWrenchSample & wrench_sample,
+    const std::array<double, 6> & applied_wrench,
+    const std::vector<double> & applied_tau,
+    const std::array<double, 6> & ee_twist);
+  std::array<double, 6> compute_end_effector_twist(const KDL::JntArray & q_dot) const;
 
   // Parameters
   std::shared_ptr<ParamListener> param_listener_;
@@ -142,13 +165,19 @@ protected:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr collision_flag_sub_;
   rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr external_wrench_sub_;
   realtime_tools::RealtimeBuffer<bool> collision_flag_buffer_;
-  realtime_tools::RealtimeBuffer<std::array<double, 6>> external_wrench_buffer_;
+  realtime_tools::RealtimeBuffer<ExternalWrenchSample> external_wrench_buffer_;
   bool joint_index_initialized_ = false;
   std::vector<int> joint_name_to_index_;
   realtime_tools::RealtimeBuffer<std::vector<double>> follower_joint_positions_buffer_;
   std::atomic<bool> has_follower_data_{false};
   std::atomic<bool> has_external_wrench_data_{false};
   bool external_wrench_segment_valid_{false};
+  KDL::Chain external_wrench_chain_;
+  std::unique_ptr<KDL::ChainJntToJacSolver> external_wrench_jac_solver_;
+  bool external_wrench_chain_valid_{false};
+  mutable std::mutex force_feedback_telemetry_mutex_;
+  std::ofstream force_feedback_telemetry_stream_;
+  bool force_feedback_telemetry_initialized_{false};
 };
 }  // namespace gravity_compensation_controller
 

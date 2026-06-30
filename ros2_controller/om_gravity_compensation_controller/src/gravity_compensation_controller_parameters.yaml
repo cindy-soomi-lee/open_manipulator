@@ -119,3 +119,13 @@ gravity_compensation_controller:
     default_value: 0.0,
     description: "Deadband for torque components in Nm"
   }
+  enable_force_feedback_telemetry: {
+    type: bool,
+    default_value: false,
+    description: "Enable CSV logging of received external wrench data and applied master torque for force reflection timing analysis"
+  }
+  force_feedback_telemetry_path: {
+    type: string,
+    default_value: "",
+    description: "Path to CSV file or directory used for master-side force feedback telemetry. If empty, the controller uses TELEOP_LOG_DIR/master_force_feedback_telemetry.csv when TELEOP_LOG_DIR is set."
+  }

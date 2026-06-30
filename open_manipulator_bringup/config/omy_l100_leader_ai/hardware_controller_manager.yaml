@@ -58,6 +58,7 @@
       external_wrench_torque_scale: 1.0
       external_wrench_force_deadband: 0.2
       external_wrench_torque_deadband: 0.02
+      enable_force_feedback_telemetry: true
       # enable_spring_effect: false
 
 /**:
