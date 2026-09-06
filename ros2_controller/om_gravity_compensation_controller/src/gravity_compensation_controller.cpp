@@ -541,18 +541,7 @@ bool GravityCompensationController::initialize_force_feedback_telemetry()
   force_feedback_telemetry_stream_ << std::fixed << std::setprecision(9);
 
   if (!file_exists) {
-    force_feedback_telemetry_stream_
-      << "ros_time_s,received_wrench_ros_time_s,received_wrench_msg_stamp_ros_s,wrench_age_ms,"
-      << "received_fx,received_fy,received_fz,received_tx,received_ty,received_tz,"
-      << "applied_fx,applied_fy,applied_fz,applied_tx,applied_ty,applied_tz,"
-      << "applied_tau_joint1,applied_tau_joint2,applied_tau_joint3,applied_tau_joint4,"
-      << "applied_tau_joint5,applied_tau_joint6,"
-      << "master_q_joint1,master_q_joint2,master_q_joint3,master_q_joint4,master_q_joint5,"
-      << "master_q_joint6,"
-      << "master_qdot_joint1,master_qdot_joint2,master_qdot_joint3,master_qdot_joint4,"
-      << "master_qdot_joint5,master_qdot_joint6,"
-      << "master_ee_twist_vx,master_ee_twist_vy,master_ee_twist_vz,"
-      << "master_ee_twist_wx,master_ee_twist_wy,master_ee_twist_wz\n";
+    write_force_feedback_telemetry_header();
   }
 
   force_feedback_telemetry_initialized_ = true;
@@ -571,6 +560,24 @@ void GravityCompensationController::close_force_feedback_telemetry()
     force_feedback_telemetry_stream_.close();
   }
   force_feedback_telemetry_initialized_ = false;
+}
+
+void GravityCompensationController::write_force_feedback_telemetry_header()
+{
+  force_feedback_telemetry_stream_
+    << "ros_time_s,source_received_ros_time_s,source_stamp_ros_time_s,wrench_age_ms,"
+    << "received_wrench_fx_n,received_wrench_fy_n,received_wrench_fz_n,"
+    << "received_wrench_tx_nm,received_wrench_ty_nm,received_wrench_tz_nm,"
+    << "applied_wrench_fx_n,applied_wrench_fy_n,applied_wrench_fz_n,"
+    << "applied_wrench_tx_nm,applied_wrench_ty_nm,applied_wrench_tz_nm,"
+    << "applied_tau_joint1_nm,applied_tau_joint2_nm,applied_tau_joint3_nm,applied_tau_joint4_nm,"
+    << "applied_tau_joint5_nm,applied_tau_joint6_nm,"
+    << "master_q_joint1_rad,master_q_joint2_rad,master_q_joint3_rad,master_q_joint4_rad,"
+    << "master_q_joint5_rad,master_q_joint6_rad,"
+    << "master_qdot_joint1_radps,master_qdot_joint2_radps,master_qdot_joint3_radps,"
+    << "master_qdot_joint4_radps,master_qdot_joint5_radps,master_qdot_joint6_radps,"
+    << "master_ee_twist_vx_mps,master_ee_twist_vy_mps,master_ee_twist_vz_mps,"
+    << "master_ee_twist_wx_radps,master_ee_twist_wy_radps,master_ee_twist_wz_radps\n";
 }
 
 std::string GravityCompensationController::resolve_force_feedback_telemetry_path() const

@@ -112,6 +112,7 @@ protected:
   bool initialize_force_feedback_telemetry();
   void close_force_feedback_telemetry();
   std::string resolve_force_feedback_telemetry_path() const;
+  void write_force_feedback_telemetry_header();
   void log_force_feedback_telemetry(
     double ros_time_s,
     const ExternalWrenchSample & wrench_sample,
