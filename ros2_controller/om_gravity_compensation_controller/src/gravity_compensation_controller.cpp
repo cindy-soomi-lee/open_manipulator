@@ -33,6 +33,7 @@ namespace
 {
 constexpr const char * kTeleopLogRoot =
   "/home/horowitzlab/project/robosuite_teleop/scripts/hardware_teleop/visualize/logs";
+constexpr double kExternalWrenchTimeoutS = 0.1;
 
 double now_seconds(const rclcpp::Clock::SharedPtr & clock)
 {
@@ -133,24 +134,27 @@ controller_interface::return_type GravityCompensationController::update(
     auto wrench_ptr = external_wrench_buffer_.readFromRT();
     if (wrench_ptr) {
       applied_wrench_sample = *wrench_ptr;
-      double fx = applied_wrench_sample.wrench[0] * params_.external_wrench_force_scale;
-      double fy = applied_wrench_sample.wrench[1] * params_.external_wrench_force_scale;
-      double fz = applied_wrench_sample.wrench[2] * params_.external_wrench_force_scale;
-      double tx = applied_wrench_sample.wrench[3] * params_.external_wrench_torque_scale;
-      double ty = applied_wrench_sample.wrench[4] * params_.external_wrench_torque_scale;
-      double tz = applied_wrench_sample.wrench[5] * params_.external_wrench_torque_scale;
+      const double wrench_age_s = ros_time_s - applied_wrench_sample.received_ros_time_s;
+      if (wrench_age_s >= 0.0 && wrench_age_s <= kExternalWrenchTimeoutS) {
+        double fx = applied_wrench_sample.wrench[0] * params_.external_wrench_force_scale;
+        double fy = applied_wrench_sample.wrench[1] * params_.external_wrench_force_scale;
+        double fz = applied_wrench_sample.wrench[2] * params_.external_wrench_force_scale;
+        double tx = applied_wrench_sample.wrench[3] * params_.external_wrench_torque_scale;
+        double ty = applied_wrench_sample.wrench[4] * params_.external_wrench_torque_scale;
+        double tz = applied_wrench_sample.wrench[5] * params_.external_wrench_torque_scale;
 
-      if (std::abs(fx) < params_.external_wrench_force_deadband) {fx = 0.0;}
-      if (std::abs(fy) < params_.external_wrench_force_deadband) {fy = 0.0;}
-      if (std::abs(fz) < params_.external_wrench_force_deadband) {fz = 0.0;}
-      if (std::abs(tx) < params_.external_wrench_torque_deadband) {tx = 0.0;}
-      if (std::abs(ty) < params_.external_wrench_torque_deadband) {ty = 0.0;}
-      if (std::abs(tz) < params_.external_wrench_torque_deadband) {tz = 0.0;}
+        if (std::abs(fx) < params_.external_wrench_force_deadband) {fx = 0.0;}
+        if (std::abs(fy) < params_.external_wrench_force_deadband) {fy = 0.0;}
+        if (std::abs(fz) < params_.external_wrench_force_deadband) {fz = 0.0;}
+        if (std::abs(tx) < params_.external_wrench_torque_deadband) {tx = 0.0;}
+        if (std::abs(ty) < params_.external_wrench_torque_deadband) {ty = 0.0;}
+        if (std::abs(tz) < params_.external_wrench_torque_deadband) {tz = 0.0;}
 
-      applied_wrench = {{fx, fy, fz, tx, ty, tz}};
-      f_ext_[params_.external_wrench_segment] = KDL::Wrench(
-        KDL::Vector(fx, fy, fz), KDL::Vector(tx, ty, tz));
-      external_wrench_applied = true;
+        applied_wrench = {{fx, fy, fz, tx, ty, tz}};
+        f_ext_[params_.external_wrench_segment] = KDL::Wrench(
+          KDL::Vector(fx, fy, fz), KDL::Vector(tx, ty, tz));
+        external_wrench_applied = true;
+      }
     }
   }
 
