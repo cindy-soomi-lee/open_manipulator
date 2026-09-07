@@ -152,11 +152,11 @@ controller_interface::return_type GravityCompensationController::update(
     }
   }
 
-  // Phase 2: compute the OMY compensation dynamics without the external wrench.
-  // When reflection is active, a second RNE solve measures the exact joint-torque
+  // Compute the OMY compensation dynamics without the external wrench. When
+  // reflection is active, a second RNE solve measures the exact joint-torque
   // contribution of the existing KDL external-load path. This preserves the
-  // current wrench frame/sign convention while preventing reflection from
-  // changing friction compensation.
+  // current wrench frame/sign convention while keeping reflection independent
+  // of the compensation calculation.
   KDL::WrenchMap no_external_wrench;
   idsolver.CartToJnt(q, q_dot, q_ddot, no_external_wrench, torques);
 
@@ -211,9 +211,9 @@ controller_interface::return_type GravityCompensationController::update(
     }
   }
 
-  // Apply friction compensation only to the OMY compensation channel. Reflection
-  // is added afterwards, but Phase 2 intentionally keeps the historical
-  // per-joint torque scaling on the combined command for a controlled comparison.
+  // Apply friction compensation only to the OMY compensation channel. Phase 3
+  // also limits the historical per-joint torque scaling to that compensation
+  // channel, then adds the reflected joint torque without distortion.
   for (size_t i = 0; i < tree_.getNrOfJoints(); ++i) {
     if (i >= joint_names_.size()) {
       continue;
@@ -253,14 +253,13 @@ controller_interface::return_type GravityCompensationController::update(
     }
 
     const double compensation_pre_scale = torques(i);
-    const double total_pre_scale = compensation_pre_scale + tau_reflect_[i];
-    const double applied_tau = total_pre_scale * params_.torque_scaling_factors[i];
+    const double compensation_tau =
+      compensation_pre_scale * params_.torque_scaling_factors[i];
+    const double applied_tau = compensation_tau + tau_reflect_[i];
     joint_command_interface_[0][i].get().set_value(applied_tau);
 
     if (telemetry_enabled) {
       tau_friction_[i] = torques(i) - torque_before_friction;
-      // From Phase 2 onward tau_pre_scale is the compensation-only torque before
-      // its joint calibration scaling; tau_reflect is logged separately.
       tau_pre_scale_[i] = compensation_pre_scale;
       tau_cmd_[i] = applied_tau;
     }
