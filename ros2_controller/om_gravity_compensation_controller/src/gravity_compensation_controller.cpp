@@ -152,33 +152,33 @@ controller_interface::return_type GravityCompensationController::update(
     }
   }
 
-  // Preserve the original control computation: RNE includes the fresh external wrench.
-  idsolver.CartToJnt(q, q_dot, q_ddot, f_ext_, torques);
+  // Phase 2: compute the OMY compensation dynamics without the external wrench.
+  // When reflection is active, a second RNE solve measures the exact joint-torque
+  // contribution of the existing KDL external-load path. This preserves the
+  // current wrench frame/sign convention while preventing reflection from
+  // changing friction compensation.
+  KDL::WrenchMap no_external_wrench;
+  idsolver.CartToJnt(q, q_dot, q_ddot, no_external_wrench, torques);
+
+  std::fill(tau_reflect_.begin(), tau_reflect_.end(), 0.0);
+  if (external_wrench_applied) {
+    KDL::JntArray torques_with_external(tree_.getNrOfJoints());
+    idsolver.CartToJnt(q, q_dot, q_ddot, f_ext_, torques_with_external);
+    for (size_t i = 0; i < n_joints_; ++i) {
+      tau_reflect_[i] = torques_with_external(i) - torques(i);
+    }
+  }
 
   if (telemetry_enabled) {
     std::fill(tau_rne_.begin(), tau_rne_.end(), 0.0);
-    std::fill(tau_reflect_.begin(), tau_reflect_.end(), 0.0);
     std::fill(tau_spring_.begin(), tau_spring_.end(), 0.0);
     std::fill(tau_sync_.begin(), tau_sync_.end(), 0.0);
     std::fill(tau_friction_.begin(), tau_friction_.end(), 0.0);
     std::fill(tau_pre_scale_.begin(), tau_pre_scale_.end(), 0.0);
     std::fill(tau_cmd_.begin(), tau_cmd_.end(), 0.0);
 
-    if (external_wrench_applied) {
-      // A second RNE solve is used only while telemetry is enabled so that the
-      // external-wrench contribution can be measured exactly without changing
-      // the torque command produced by the original solve above.
-      KDL::WrenchMap no_external_wrench;
-      KDL::JntArray torques_without_external_wrench(tree_.getNrOfJoints());
-      idsolver.CartToJnt(q, q_dot, q_ddot, no_external_wrench, torques_without_external_wrench);
-      for (size_t i = 0; i < n_joints_; ++i) {
-        tau_rne_[i] = torques_without_external_wrench(i);
-        tau_reflect_[i] = torques(i) - torques_without_external_wrench(i);
-      }
-    } else {
-      for (size_t i = 0; i < n_joints_; ++i) {
-        tau_rne_[i] = torques(i);
-      }
+    for (size_t i = 0; i < n_joints_; ++i) {
+      tau_rne_[i] = torques(i);
     }
   }
 
@@ -211,7 +211,9 @@ controller_interface::return_type GravityCompensationController::update(
     }
   }
 
-  // Apply friction compensation and command the hardware exactly as before.
+  // Apply friction compensation only to the OMY compensation channel. Reflection
+  // is added afterwards, but Phase 2 intentionally keeps the historical
+  // per-joint torque scaling on the combined command for a controlled comparison.
   for (size_t i = 0; i < tree_.getNrOfJoints(); ++i) {
     if (i >= joint_names_.size()) {
       continue;
@@ -250,12 +252,16 @@ controller_interface::return_type GravityCompensationController::update(
       }
     }
 
-    const double applied_tau = torques(i) * params_.torque_scaling_factors[i];
+    const double compensation_pre_scale = torques(i);
+    const double total_pre_scale = compensation_pre_scale + tau_reflect_[i];
+    const double applied_tau = total_pre_scale * params_.torque_scaling_factors[i];
     joint_command_interface_[0][i].get().set_value(applied_tau);
 
     if (telemetry_enabled) {
       tau_friction_[i] = torques(i) - torque_before_friction;
-      tau_pre_scale_[i] = torques(i);
+      // From Phase 2 onward tau_pre_scale is the compensation-only torque before
+      // its joint calibration scaling; tau_reflect is logged separately.
+      tau_pre_scale_[i] = compensation_pre_scale;
       tau_cmd_[i] = applied_tau;
     }
   }
