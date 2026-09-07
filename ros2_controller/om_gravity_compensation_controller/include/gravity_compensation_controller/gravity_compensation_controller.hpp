@@ -12,47 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/* This header must be included by all rclcpp headers which declare symbols
- * which are defined in the rclcpp library. When not building the rclcpp
- * library, i.e. when using the headers in other package's code, the contents
- * of this header change the visibility of certain symbols which the rclcpp
- * library cannot have, but the consuming code must have inorder to link.
- */
-
 #ifndef GRAVITY_COMPENSATION_CONTROLLER__GRAVITY_COMPENSATION_CONTROLLER_HPP_
 #define GRAVITY_COMPENSATION_CONTROLLER__GRAVITY_COMPENSATION_CONTROLLER_HPP_
 
-#include <atomic>
 #include <array>
-#include <fstream>
+#include <atomic>
+#include <cstdint>
+#include <map>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
-#include <map>
 
 #include "gravity_compensation_controller/visibility_control.h"
 
-#include "std_msgs/msg/bool.hpp"
+#include "controller_interface/controller_interface.hpp"
 #include "geometry_msgs/msg/wrench_stamped.hpp"
-#include <controller_interface/controller_interface.hpp>
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
+#include "omy_controller_interfaces/msg/omy_controller_telemetry.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
-#include "std_msgs/msg/float64_multi_array.hpp"
+#include "std_msgs/msg/bool.hpp"
 
-#include <kdl_parser/kdl_parser.hpp>
 #include <kdl/frames.hpp>
 #include <kdl/jntarray.hpp>
-#include <kdl/jacobian.hpp>
-#include <kdl/chain.hpp>
-#include <kdl/chainjnttojacsolver.hpp>
 #include <kdl/tree.hpp>
 #include <kdl/treeidsolver_recursive_newton_euler.hpp>
+#include <kdl_parser/kdl_parser.hpp>
 #include <om_gravity_compensation_controller/gravity_compensation_controller_parameters.hpp>
 #include <realtime_tools/realtime_buffer.hpp>
-
+#include <realtime_tools/realtime_publisher.hpp>
 
 namespace gravity_compensation_controller
 {
@@ -100,6 +89,8 @@ public:
     const rclcpp_lifecycle::State & previous_state) override;
 
 protected:
+  using ControllerTelemetry = omy_controller_interfaces::msg::OMYControllerTelemetry;
+
   struct ExternalWrenchSample
   {
     std::array<double, 6> wrench{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
@@ -109,17 +100,7 @@ protected:
   };
 
   std::string formatVector(const std::vector<double> & vec);
-  bool initialize_force_feedback_telemetry();
-  void close_force_feedback_telemetry();
-  std::string resolve_force_feedback_telemetry_path() const;
-  void write_force_feedback_telemetry_header();
-  void log_force_feedback_telemetry(
-    double ros_time_s,
-    const ExternalWrenchSample & wrench_sample,
-    const std::array<double, 6> & applied_wrench,
-    const std::vector<double> & applied_tau,
-    const std::array<double, 6> & ee_twist);
-  std::array<double, 6> compute_end_effector_twist(const KDL::JntArray & q_dot) const;
+  void configure_controller_telemetry();
 
   // Parameters
   std::shared_ptr<ParamListener> param_listener_;
@@ -142,12 +123,8 @@ protected:
     hardware_interface::HW_IF_EFFORT
   };
 
-  // Storing command joint names for interfaces
   std::vector<std::string> command_joint_names_;
 
-  // The interfaces are defined as the types in 'allowed_interface_types_' member.
-  // For convenience, for each type the interfaces are ordered so that i-th position
-  // matches i-th index in joint_names_
   template<typename T>
   using InterfaceReferences = std::vector<std::vector<std::reference_wrapper<T>>>;
 
@@ -159,8 +136,19 @@ protected:
 
   std::vector<double> joint_positions_;
   std::vector<double> joint_velocities_;
+  std::vector<double> joint_velocities_measured_;
+  std::vector<double> joint_accelerations_;
   std::vector<double> previous_velocities_;
   std::vector<double> tmp_positions_;
+
+  // Preallocated telemetry decomposition buffers.
+  std::vector<double> tau_rne_;
+  std::vector<double> tau_reflect_;
+  std::vector<double> tau_spring_;
+  std::vector<double> tau_sync_;
+  std::vector<double> tau_friction_;
+  std::vector<double> tau_pre_scale_;
+  std::vector<double> tau_cmd_;
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr follower_joint_state_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr collision_flag_sub_;
@@ -173,12 +161,12 @@ protected:
   std::atomic<bool> has_follower_data_{false};
   std::atomic<bool> has_external_wrench_data_{false};
   bool external_wrench_segment_valid_{false};
-  KDL::Chain external_wrench_chain_;
-  std::unique_ptr<KDL::ChainJntToJacSolver> external_wrench_jac_solver_;
-  bool external_wrench_chain_valid_{false};
-  mutable std::mutex force_feedback_telemetry_mutex_;
-  std::ofstream force_feedback_telemetry_stream_;
-  bool force_feedback_telemetry_initialized_{false};
+
+  rclcpp::Publisher<ControllerTelemetry>::SharedPtr controller_telemetry_pub_;
+  std::unique_ptr<realtime_tools::RealtimePublisher<ControllerTelemetry>>
+    controller_telemetry_rt_pub_;
+  uint64_t controller_telemetry_seq_{0};
+  uint64_t controller_telemetry_publish_missed_{0};
 };
 }  // namespace gravity_compensation_controller
 

@@ -18,6 +18,7 @@
   <depend>geometry_msgs</depend>
   <depend>generate_parameter_library</depend>
   <depend>hardware_interface</depend>
+  <depend>omy_controller_interfaces</depend>
   <depend>pluginlib</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_lifecycle</depend>

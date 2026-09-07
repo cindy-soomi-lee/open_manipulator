@@ -20,6 +20,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   generate_parameter_library
   hardware_interface
   kdl_parser
+  omy_controller_interfaces
   orocos_kdl_vendor
   pluginlib
   rclcpp
@@ -73,6 +74,7 @@ ament_target_dependencies(gravity_compensation_controller
   angles
   geometry_msgs
   kdl_parser
+  omy_controller_interfaces
   orocos_kdl_vendor
   rclcpp
   rclcpp_lifecycle

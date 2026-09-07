@@ -13,41 +13,28 @@
 // limitations under the License.
 
 #include <gravity_compensation_controller/gravity_compensation_controller.hpp>
+
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <iomanip>
 #include <limits>
 #include <sstream>
-#include <string>
 #include <stdexcept>
-#include <rclcpp/rclcpp.hpp>
+#include <string>
+
 #include <controller_interface/helpers.hpp>
+#include <rclcpp/rclcpp.hpp>
 
 namespace gravity_compensation_controller
 {
 namespace
 {
-constexpr const char * kTeleopLogRoot =
-  "/home/horowitzlab/project/robosuite_teleop/scripts/hardware_teleop/visualize/logs";
 constexpr double kExternalWrenchTimeoutS = 0.1;
 
 double now_seconds(const rclcpp::Clock::SharedPtr & clock)
 {
   return static_cast<double>(clock->now().nanoseconds()) * 1e-9;
-}
-
-std::string trim_whitespace(std::string value)
-{
-  const auto begin = value.find_first_not_of(" \t\r\n");
-  if (begin == std::string::npos) {
-    return {};
-  }
-  const auto end = value.find_last_not_of(" \t\r\n");
-  return value.substr(begin, end - begin + 1);
 }
 }  // namespace
 
@@ -88,9 +75,13 @@ GravityCompensationController::state_interface_configuration() const
 }
 
 controller_interface::return_type GravityCompensationController::update(
-  [[maybe_unused]] const rclcpp::Time & time, const rclcpp::Duration & period)
+  const rclcpp::Time & time, const rclcpp::Duration & period)
 {
+  const auto update_start = std::chrono::steady_clock::now();
   const double ros_time_s = now_seconds(get_node()->get_clock());
+  const bool telemetry_enabled =
+    params_.enable_controller_telemetry && controller_telemetry_rt_pub_ != nullptr;
+
   auto assign_point_from_interface =
     [&](std::vector<double> & trajectory_point_interface, const auto & joint_interface) {
       for (size_t index = 0; index < n_joints_; ++index) {
@@ -99,49 +90,52 @@ controller_interface::return_type GravityCompensationController::update(
     };
 
   assign_point_from_interface(joint_positions_, joint_state_interface_[0]);
-  assign_point_from_interface(joint_velocities_, joint_state_interface_[1]);
+  assign_point_from_interface(joint_velocities_measured_, joint_state_interface_[1]);
 
-  // Apply velocity scaling factors from parameters
-  for (size_t i = 0; i < joint_velocities_.size(); i++) {
-    joint_velocities_[i] = joint_velocities_[i] * params_.input_velocity_scaling_factors[i];
-  }
-  // Calculate acceleration from velocity using finite difference
-  std::vector<double> joint_accelerations(n_joints_);
+  // Preserve the raw hardware velocity for telemetry while keeping the existing
+  // scaled velocity as the value used by KDL and friction compensation.
   for (size_t i = 0; i < n_joints_; ++i) {
-    joint_accelerations[i] = (joint_velocities_[i] - previous_velocities_[i]) / period.seconds() *
+    joint_velocities_[i] =
+      joint_velocities_measured_[i] * params_.input_velocity_scaling_factors[i];
+  }
+
+  // Calculate acceleration from the scaled velocity using the existing finite difference.
+  for (size_t i = 0; i < n_joints_; ++i) {
+    joint_accelerations_[i] =
+      (joint_velocities_[i] - previous_velocities_[i]) / period.seconds() *
       params_.input_acceleration_scaling_factors[i];
   }
 
-  // Create KDL objects for computation
   KDL::TreeIdSolver_RNE idsolver(tree_, KDL::Vector(0, 0, -9.81));
   KDL::JntArray q(tree_.getNrOfJoints());
   KDL::JntArray q_dot(tree_.getNrOfJoints());
   KDL::JntArray q_ddot(tree_.getNrOfJoints());
   KDL::JntArray torques(tree_.getNrOfJoints());
 
-  // Populate joint positions, velocities and accelerations from state interfaces
   for (size_t i = 0; i < joint_names_.size(); ++i) {
     q(i) = joint_positions_[i];
     q_dot(i) = joint_velocities_[i];
-    q_ddot(i) = joint_accelerations[i];
+    q_ddot(i) = joint_accelerations_[i];
   }
 
   f_ext_.clear();
-  ExternalWrenchSample applied_wrench_sample;
+  ExternalWrenchSample wrench_sample;
+  const bool external_wrench_received = has_external_wrench_data_.load();
   bool external_wrench_applied = false;
   std::array<double, 6> applied_wrench{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
-  if (params_.enable_external_wrench && external_wrench_segment_valid_ && has_external_wrench_data_) {
+
+  if (params_.enable_external_wrench && external_wrench_segment_valid_ && external_wrench_received) {
     auto wrench_ptr = external_wrench_buffer_.readFromRT();
     if (wrench_ptr) {
-      applied_wrench_sample = *wrench_ptr;
-      const double wrench_age_s = ros_time_s - applied_wrench_sample.received_ros_time_s;
+      wrench_sample = *wrench_ptr;
+      const double wrench_age_s = ros_time_s - wrench_sample.received_ros_time_s;
       if (wrench_age_s >= 0.0 && wrench_age_s <= kExternalWrenchTimeoutS) {
-        double fx = applied_wrench_sample.wrench[0] * params_.external_wrench_force_scale;
-        double fy = applied_wrench_sample.wrench[1] * params_.external_wrench_force_scale;
-        double fz = applied_wrench_sample.wrench[2] * params_.external_wrench_force_scale;
-        double tx = applied_wrench_sample.wrench[3] * params_.external_wrench_torque_scale;
-        double ty = applied_wrench_sample.wrench[4] * params_.external_wrench_torque_scale;
-        double tz = applied_wrench_sample.wrench[5] * params_.external_wrench_torque_scale;
+        double fx = wrench_sample.wrench[0] * params_.external_wrench_force_scale;
+        double fy = wrench_sample.wrench[1] * params_.external_wrench_force_scale;
+        double fz = wrench_sample.wrench[2] * params_.external_wrench_force_scale;
+        double tx = wrench_sample.wrench[3] * params_.external_wrench_torque_scale;
+        double ty = wrench_sample.wrench[4] * params_.external_wrench_torque_scale;
+        double tz = wrench_sample.wrench[5] * params_.external_wrench_torque_scale;
 
         if (std::abs(fx) < params_.external_wrench_force_deadband) {fx = 0.0;}
         if (std::abs(fy) < params_.external_wrench_force_deadband) {fy = 0.0;}
@@ -158,42 +152,75 @@ controller_interface::return_type GravityCompensationController::update(
     }
   }
 
-  // Compute torques
+  // Preserve the original control computation: RNE includes the fresh external wrench.
   idsolver.CartToJnt(q, q_dot, q_ddot, f_ext_, torques);
 
-  // Optional spring effect on joint 2
-  if (params_.enable_spring_effect) {
-    if (q(2) < 0.5) {
-      torques(2) += std::abs(q(2) - 0.5) * 2.5;
+  if (telemetry_enabled) {
+    std::fill(tau_rne_.begin(), tau_rne_.end(), 0.0);
+    std::fill(tau_reflect_.begin(), tau_reflect_.end(), 0.0);
+    std::fill(tau_spring_.begin(), tau_spring_.end(), 0.0);
+    std::fill(tau_sync_.begin(), tau_sync_.end(), 0.0);
+    std::fill(tau_friction_.begin(), tau_friction_.end(), 0.0);
+    std::fill(tau_pre_scale_.begin(), tau_pre_scale_.end(), 0.0);
+    std::fill(tau_cmd_.begin(), tau_cmd_.end(), 0.0);
+
+    if (external_wrench_applied) {
+      // A second RNE solve is used only while telemetry is enabled so that the
+      // external-wrench contribution can be measured exactly without changing
+      // the torque command produced by the original solve above.
+      KDL::WrenchMap no_external_wrench;
+      KDL::JntArray torques_without_external_wrench(tree_.getNrOfJoints());
+      idsolver.CartToJnt(q, q_dot, q_ddot, no_external_wrench, torques_without_external_wrench);
+      for (size_t i = 0; i < n_joints_; ++i) {
+        tau_rne_[i] = torques_without_external_wrench(i);
+        tau_reflect_[i] = torques(i) - torques_without_external_wrench(i);
+      }
+    } else {
+      for (size_t i = 0; i < n_joints_; ++i) {
+        tau_rne_[i] = torques(i);
+      }
     }
   }
-  // Add leader sync function
-  double gain_joint_1_to_3 = 6.0;
-  double default_gain = 1.0;
-  bool collision = *collision_flag_buffer_.readFromRT();
+
+  // Optional spring effect on joint 2. Preserve the exact existing contribution.
+  if (params_.enable_spring_effect && q(2) < 0.5) {
+    const double spring_tau = std::abs(q(2) - 0.5) * 2.5;
+    torques(2) += spring_tau;
+    if (telemetry_enabled && n_joints_ > 2) {
+      tau_spring_[2] = spring_tau;
+    }
+  }
+
+  // Add leader sync function.
+  const double gain_joint_1_to_3 = 6.0;
+  const double default_gain = 1.0;
+  const bool collision = *collision_flag_buffer_.readFromRT();
 
   if (collision && has_follower_data_) {
     auto follower_positions_ptr = follower_joint_positions_buffer_.readFromRT();
     if (follower_positions_ptr) {
       for (size_t i = 0; i < n_joints_; ++i) {
-        double error = (*follower_positions_ptr)[i] - joint_positions_[i];
-        double gain = (i <= 2) ? gain_joint_1_to_3 : default_gain;
-        torques(i) += gain * error;
+        const double error = (*follower_positions_ptr)[i] - joint_positions_[i];
+        const double gain = (i <= 2) ? gain_joint_1_to_3 : default_gain;
+        const double sync_tau = gain * error;
+        torques(i) += sync_tau;
+        if (telemetry_enabled) {
+          tau_sync_[i] = sync_tau;
+        }
       }
     }
   }
 
-  // Apply friction compensation
-  std::vector<double> applied_tau(n_joints_, 0.0);
+  // Apply friction compensation and command the hardware exactly as before.
   for (size_t i = 0; i < tree_.getNrOfJoints(); ++i) {
     if (i >= joint_names_.size()) {
       continue;
     }
 
+    const double torque_before_friction = torques(i);
     double kinetic_friction_scalar = params_.kinetic_friction_scalars[i] *
       (1.0 + std::abs(torques(i) * params_.kinetic_friction_torque_scalars[i]));
 
-    // Kinetic friction compensation
     double kinetic_friction_rate = 1.0 -
       (std::abs(q_dot(i)) * 10.0 - params_.friction_compensation_velocity_thresholds[i]);
     if (kinetic_friction_rate < 0.0) {
@@ -215,7 +242,6 @@ controller_interface::return_type GravityCompensationController::update(
       }
     }
 
-    // Static friction compensation (dithering)
     if (std::abs(q_dot(i)) < params_.static_friction_velocity_thresholds[i]) {
       if (dither_switch_) {
         torques(i) += params_.static_friction_scalars[i] * std::abs(torques(i));
@@ -224,23 +250,73 @@ controller_interface::return_type GravityCompensationController::update(
       }
     }
 
-    applied_tau[i] = torques(i) * params_.torque_scaling_factors[i];
-    joint_command_interface_[0][i].get().set_value(applied_tau[i]);
+    const double applied_tau = torques(i) * params_.torque_scaling_factors[i];
+    joint_command_interface_[0][i].get().set_value(applied_tau);
+
+    if (telemetry_enabled) {
+      tau_friction_[i] = torques(i) - torque_before_friction;
+      tau_pre_scale_[i] = torques(i);
+      tau_cmd_[i] = applied_tau;
+    }
   }
 
-  if (force_feedback_telemetry_initialized_ && external_wrench_applied) {
-    log_force_feedback_telemetry(
-      ros_time_s,
-      applied_wrench_sample,
-      applied_wrench,
-      applied_tau,
-      compute_end_effector_twist(q_dot));
+  if (telemetry_enabled) {
+    ++controller_telemetry_seq_;
+    if (controller_telemetry_rt_pub_->trylock()) {
+      auto & msg = controller_telemetry_rt_pub_->msg_;
+      const double nan_value = std::numeric_limits<double>::quiet_NaN();
+      const double receive_age_s = external_wrench_received ?
+        ros_time_s - wrench_sample.received_ros_time_s : nan_value;
+      const double stamp_age_s =
+        external_wrench_received && wrench_sample.has_msg_stamp ?
+        ros_time_s - wrench_sample.msg_stamp_ros_time_s : nan_value;
+
+      msg.stamp = time.to_msg();
+      msg.controller_seq = controller_telemetry_seq_;
+      msg.publish_missed_total = controller_telemetry_publish_missed_;
+      msg.period_s = period.seconds();
+      msg.update_compute_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - update_start).count();
+      msg.collision_active = collision;
+
+      msg.external_wrench_received = external_wrench_received;
+      msg.external_wrench_fresh = external_wrench_applied;
+      msg.external_wrench_has_stamp = external_wrench_received && wrench_sample.has_msg_stamp;
+      msg.external_wrench_received_ros_time_s = external_wrench_received ?
+        wrench_sample.received_ros_time_s : nan_value;
+      msg.external_wrench_msg_stamp_ros_time_s =
+        external_wrench_received && wrench_sample.has_msg_stamp ?
+        wrench_sample.msg_stamp_ros_time_s : nan_value;
+      msg.external_wrench_receive_age_s = receive_age_s;
+      msg.external_wrench_stamp_age_s = stamp_age_s;
+
+      for (size_t i = 0; i < 6; ++i) {
+        msg.wrench_received[i] = external_wrench_received ? wrench_sample.wrench[i] : 0.0;
+        msg.wrench_used[i] = applied_wrench[i];
+      }
+
+      for (size_t i = 0; i < n_joints_; ++i) {
+        msg.q[i] = joint_positions_[i];
+        msg.qdot_measured[i] = joint_velocities_measured_[i];
+        msg.qdot_kdl[i] = joint_velocities_[i];
+        msg.qddot_kdl[i] = joint_accelerations_[i];
+        msg.tau_rne[i] = tau_rne_[i];
+        msg.tau_reflect[i] = tau_reflect_[i];
+        msg.tau_spring[i] = tau_spring_[i];
+        msg.tau_sync[i] = tau_sync_[i];
+        msg.tau_friction[i] = tau_friction_[i];
+        msg.tau_pre_scale[i] = tau_pre_scale_[i];
+        msg.tau_cmd[i] = tau_cmd_[i];
+      }
+
+      controller_telemetry_rt_pub_->unlockAndPublish();
+    } else {
+      ++controller_telemetry_publish_missed_;
+    }
   }
 
-  // Update previous velocities for next iteration
   previous_velocities_ = joint_velocities_;
-
-  dither_switch_ = !dither_switch_;  // Flip the dither switch
+  dither_switch_ = !dither_switch_;
 
   return controller_interface::return_type::OK;
 }
@@ -248,7 +324,6 @@ controller_interface::return_type GravityCompensationController::update(
 controller_interface::CallbackReturn GravityCompensationController::on_init()
 {
   try {
-    // Create the parameter listener and get the parameters
     param_listener_ = std::make_shared<ParamListener>(get_node());
     params_ = param_listener_->get_params();
   } catch (const std::exception & e) {
@@ -269,25 +344,30 @@ controller_interface::CallbackReturn GravityCompensationController::on_configure
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  // update the dynamic map parameters
   param_listener_->refresh_dynamic_parameters();
-
-  // get parameters from the listener in case they were updated
   params_ = param_listener_->get_params();
 
-  // get degrees of freedom
   n_joints_ = params_.joints.size();
   joint_names_ = params_.joints;
   collision_flag_buffer_.writeFromNonRT(false);
   joint_positions_.resize(n_joints_);
   joint_velocities_.resize(n_joints_);
-  previous_velocities_.resize(n_joints_);  // Initialize previous velocities vector
+  joint_velocities_measured_.resize(n_joints_);
+  joint_accelerations_.resize(n_joints_);
+  previous_velocities_.resize(n_joints_);
   joint_name_to_index_.resize(joint_names_.size(), -1);
   tmp_positions_.resize(joint_names_.size(), 0.0);
   external_wrench_buffer_.writeFromNonRT(ExternalWrenchSample{});
-  if (!initialize_force_feedback_telemetry()) {
-    return CallbackReturn::ERROR;
-  }
+
+  tau_rne_.resize(n_joints_);
+  tau_reflect_.resize(n_joints_);
+  tau_spring_.resize(n_joints_);
+  tau_sync_.resize(n_joints_);
+  tau_friction_.resize(n_joints_);
+  tau_pre_scale_.resize(n_joints_);
+  tau_cmd_.resize(n_joints_);
+
+  configure_controller_telemetry();
 
   follower_joint_state_sub_ = get_node()->create_subscription<sensor_msgs::msg::JointState>(
     "/joint_states", rclcpp::QoS(10),
@@ -353,14 +433,10 @@ controller_interface::CallbackReturn GravityCompensationController::on_configure
         }
         external_wrench_buffer_.writeFromNonRT(sample);
         has_external_wrench_data_ = true;
-        if (params_.enable_force_feedback_telemetry && !force_feedback_telemetry_initialized_) {
-          initialize_force_feedback_telemetry();
-        }
       });
   }
 
   if (params_.joints.empty()) {
-    // TODO(destogl): is this correct? Can we really move-on if no joint names are not provided?
     RCLCPP_WARN(logger, "'joints' parameter is empty.");
   }
 
@@ -377,7 +453,7 @@ controller_interface::CallbackReturn GravityCompensationController::on_configure
 
   std::string robot_description;
   get_node()->get_parameter("robot_description", robot_description);
-  
+
   const std::string & urdf = robot_description;
   if (!urdf.empty()) {
     if (!kdl_parser::treeFromString(urdf, tree_)) {
@@ -404,21 +480,7 @@ controller_interface::CallbackReturn GravityCompensationController::on_configure
       return CallbackReturn::ERROR;
     }
 
-    const std::string base_segment = tree_.getRootSegment()->first;
-    external_wrench_chain_valid_ =
-      tree_.getChain(base_segment, params_.external_wrench_segment, external_wrench_chain_);
-    if (external_wrench_chain_valid_) {
-      external_wrench_jac_solver_ =
-        std::make_unique<KDL::ChainJntToJacSolver>(external_wrench_chain_);
-    } else if (params_.enable_force_feedback_telemetry) {
-      RCLCPP_WARN(
-        get_node()->get_logger(),
-        "Failed to build KDL chain from '%s' to '%s'; master_ee_twist telemetry will be zeroed.",
-        base_segment.c_str(),
-        params_.external_wrench_segment.c_str());
-    }
   } else {
-    // empty URDF is used for some tests
     RCLCPP_DEBUG(get_node()->get_logger(), "No URDF file given");
   }
 
@@ -426,17 +488,50 @@ controller_interface::CallbackReturn GravityCompensationController::on_configure
   return CallbackReturn::SUCCESS;
 }
 
+void GravityCompensationController::configure_controller_telemetry()
+{
+  controller_telemetry_rt_pub_.reset();
+  controller_telemetry_pub_.reset();
+  controller_telemetry_seq_ = 0;
+  controller_telemetry_publish_missed_ = 0;
+
+  if (!params_.enable_controller_telemetry) {
+    return;
+  }
+
+  controller_telemetry_pub_ = get_node()->create_publisher<ControllerTelemetry>(
+    params_.controller_telemetry_topic, rclcpp::SensorDataQoS());
+  controller_telemetry_rt_pub_ =
+    std::make_unique<realtime_tools::RealtimePublisher<ControllerTelemetry>>(
+    controller_telemetry_pub_);
+
+  auto & msg = controller_telemetry_rt_pub_->msg_;
+  msg.q.resize(n_joints_);
+  msg.qdot_measured.resize(n_joints_);
+  msg.qdot_kdl.resize(n_joints_);
+  msg.qddot_kdl.resize(n_joints_);
+  msg.tau_rne.resize(n_joints_);
+  msg.tau_reflect.resize(n_joints_);
+  msg.tau_spring.resize(n_joints_);
+  msg.tau_sync.resize(n_joints_);
+  msg.tau_friction.resize(n_joints_);
+  msg.tau_pre_scale.resize(n_joints_);
+  msg.tau_cmd.resize(n_joints_);
+
+  RCLCPP_INFO(
+    get_node()->get_logger(),
+    "OMY controller telemetry enabled on '%s'.",
+    params_.controller_telemetry_topic.c_str());
+}
+
 controller_interface::CallbackReturn GravityCompensationController::on_activate(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
   auto logger = get_node()->get_logger();
 
-  // update the dynamic map parameters
   param_listener_->refresh_dynamic_parameters();
-
-  // get parameters from the listener in case they were updated
   params_ = param_listener_->get_params();
-  // order all joints in the storage
+
   for (const auto & interface : params_.command_interfaces) {
     auto it =
       std::find(command_interface_types_.begin(), command_interface_types_.end(), interface);
@@ -475,7 +570,6 @@ controller_interface::CallbackReturn GravityCompensationController::on_deactivat
       command_interfaces_[i * command_interface_types_.size() + j].set_value(0.0);
     }
   }
-  close_force_feedback_telemetry();
   RCLCPP_INFO(get_node()->get_logger(), "GravityCompensationController deactivated successfully.");
   return CallbackReturn::SUCCESS;
 }
@@ -483,218 +577,15 @@ controller_interface::CallbackReturn GravityCompensationController::on_deactivat
 controller_interface::CallbackReturn GravityCompensationController::on_cleanup(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
-  // Reset flags and parameters
   dither_switch_ = false;
 
-  // Clear KDL tree and joint name map
   tree_ = KDL::Tree();
-  external_wrench_chain_ = KDL::Chain();
-  external_wrench_jac_solver_.reset();
-  external_wrench_chain_valid_ = false;
-
-  // Clear vectors
   f_ext_.clear();
-  close_force_feedback_telemetry();
+  controller_telemetry_rt_pub_.reset();
+  controller_telemetry_pub_.reset();
 
   RCLCPP_INFO(get_node()->get_logger(), "GravityCompensationController cleaned up successfully.");
   return CallbackReturn::SUCCESS;
-}
-
-bool GravityCompensationController::initialize_force_feedback_telemetry()
-{
-  close_force_feedback_telemetry();
-
-  if (!params_.enable_force_feedback_telemetry) {
-    return true;
-  }
-
-  namespace fs = std::filesystem;
-  const std::string resolved_path = resolve_force_feedback_telemetry_path();
-  if (resolved_path.empty()) {
-    RCLCPP_WARN(
-      get_node()->get_logger(),
-      "Force feedback telemetry enabled, but no path was provided and TELEOP_LOG_DIR is unset. "
-      "Master telemetry logging will stay disabled.");
-    return true;
-  }
-
-  const fs::path telemetry_path(resolved_path);
-  std::error_code ec;
-  if (telemetry_path.has_parent_path()) {
-    fs::create_directories(telemetry_path.parent_path(), ec);
-    if (ec) {
-      RCLCPP_ERROR(
-        get_node()->get_logger(),
-        "Failed to create force feedback telemetry directory '%s': %s",
-        telemetry_path.parent_path().string().c_str(),
-        ec.message().c_str());
-      return false;
-    }
-  }
-
-  const bool file_exists = fs::exists(telemetry_path);
-  force_feedback_telemetry_stream_.open(telemetry_path, std::ios::out | std::ios::app);
-  if (!force_feedback_telemetry_stream_.is_open()) {
-    RCLCPP_ERROR(
-      get_node()->get_logger(),
-      "Failed to open force feedback telemetry file '%s'.",
-      telemetry_path.string().c_str());
-    return false;
-  }
-
-  force_feedback_telemetry_stream_ << std::fixed << std::setprecision(9);
-
-  if (!file_exists) {
-    write_force_feedback_telemetry_header();
-  }
-
-  force_feedback_telemetry_initialized_ = true;
-  RCLCPP_INFO(
-    get_node()->get_logger(),
-    "Master force feedback telemetry logging enabled: %s",
-    telemetry_path.string().c_str());
-  return true;
-}
-
-void GravityCompensationController::close_force_feedback_telemetry()
-{
-  std::lock_guard<std::mutex> lock(force_feedback_telemetry_mutex_);
-  if (force_feedback_telemetry_stream_.is_open()) {
-    force_feedback_telemetry_stream_.flush();
-    force_feedback_telemetry_stream_.close();
-  }
-  force_feedback_telemetry_initialized_ = false;
-}
-
-void GravityCompensationController::write_force_feedback_telemetry_header()
-{
-  force_feedback_telemetry_stream_
-    << "ros_time_s,source_received_ros_time_s,source_stamp_ros_time_s,wrench_age_ms,"
-    << "received_wrench_fx_n,received_wrench_fy_n,received_wrench_fz_n,"
-    << "received_wrench_tx_nm,received_wrench_ty_nm,received_wrench_tz_nm,"
-    << "applied_wrench_fx_n,applied_wrench_fy_n,applied_wrench_fz_n,"
-    << "applied_wrench_tx_nm,applied_wrench_ty_nm,applied_wrench_tz_nm,"
-    << "applied_tau_joint1_nm,applied_tau_joint2_nm,applied_tau_joint3_nm,applied_tau_joint4_nm,"
-    << "applied_tau_joint5_nm,applied_tau_joint6_nm,"
-    << "master_q_joint1_rad,master_q_joint2_rad,master_q_joint3_rad,master_q_joint4_rad,"
-    << "master_q_joint5_rad,master_q_joint6_rad,"
-    << "master_qdot_joint1_radps,master_qdot_joint2_radps,master_qdot_joint3_radps,"
-    << "master_qdot_joint4_radps,master_qdot_joint5_radps,master_qdot_joint6_radps,"
-    << "master_ee_twist_vx_mps,master_ee_twist_vy_mps,master_ee_twist_vz_mps,"
-    << "master_ee_twist_wx_radps,master_ee_twist_wy_radps,master_ee_twist_wz_radps\n";
-}
-
-std::string GravityCompensationController::resolve_force_feedback_telemetry_path() const
-{
-  namespace fs = std::filesystem;
-
-  if (!params_.force_feedback_telemetry_path.empty()) {
-    const fs::path configured_path(params_.force_feedback_telemetry_path);
-    if (configured_path.has_extension()) {
-      return configured_path.string();
-    }
-    return (configured_path / "master_force_feedback_telemetry.csv").string();
-  }
-
-  const char * teleop_log_dir = std::getenv("TELEOP_LOG_DIR");
-  if (teleop_log_dir != nullptr && teleop_log_dir[0] != '\0') {
-    return (fs::path(teleop_log_dir) / "master_force_feedback_telemetry.csv").string();
-  }
-
-  const fs::path current_run_file = fs::path(kTeleopLogRoot) / ".current_run_dir";
-  std::ifstream current_run_stream(current_run_file);
-  if (current_run_stream.is_open()) {
-    std::ostringstream buffer;
-    buffer << current_run_stream.rdbuf();
-    const std::string current_run_dir = trim_whitespace(buffer.str());
-    if (!current_run_dir.empty()) {
-      const fs::path run_dir(current_run_dir);
-      if (fs::exists(run_dir) && fs::is_directory(run_dir)) {
-        return (run_dir / "master_force_feedback_telemetry.csv").string();
-      }
-    }
-  }
-
-  return {};
-}
-
-void GravityCompensationController::log_force_feedback_telemetry(
-  double ros_time_s,
-  const ExternalWrenchSample & wrench_sample,
-  const std::array<double, 6> & applied_wrench,
-  const std::vector<double> & applied_tau,
-  const std::array<double, 6> & ee_twist)
-{
-  std::lock_guard<std::mutex> lock(force_feedback_telemetry_mutex_);
-  if (!force_feedback_telemetry_stream_.is_open()) {
-    return;
-  }
-
-  const double nan_value = std::numeric_limits<double>::quiet_NaN();
-  const double msg_stamp_ros_time_s = wrench_sample.has_msg_stamp ?
-    wrench_sample.msg_stamp_ros_time_s : nan_value;
-  const double wrench_age_ms = wrench_sample.has_msg_stamp ?
-    (ros_time_s - wrench_sample.msg_stamp_ros_time_s) * 1e3 : nan_value;
-
-  force_feedback_telemetry_stream_
-    << ros_time_s << ','
-    << wrench_sample.received_ros_time_s << ','
-    << msg_stamp_ros_time_s << ','
-    << wrench_age_ms;
-
-  for (const double value : wrench_sample.wrench) {
-    force_feedback_telemetry_stream_ << ',' << value;
-  }
-  for (const double value : applied_wrench) {
-    force_feedback_telemetry_stream_ << ',' << value;
-  }
-  for (const double value : applied_tau) {
-    force_feedback_telemetry_stream_ << ',' << value;
-  }
-  for (const double value : joint_positions_) {
-    force_feedback_telemetry_stream_ << ',' << value;
-  }
-  for (const double value : joint_velocities_) {
-    force_feedback_telemetry_stream_ << ',' << value;
-  }
-  for (const double value : ee_twist) {
-    force_feedback_telemetry_stream_ << ',' << value;
-  }
-  force_feedback_telemetry_stream_ << '\n';
-}
-
-std::array<double, 6> GravityCompensationController::compute_end_effector_twist(
-  const KDL::JntArray & q_dot) const
-{
-  std::array<double, 6> ee_twist{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
-  if (!external_wrench_chain_valid_ || !external_wrench_jac_solver_) {
-    return ee_twist;
-  }
-
-  KDL::JntArray chain_q(external_wrench_chain_.getNrOfJoints());
-  KDL::JntArray chain_q_dot(external_wrench_chain_.getNrOfJoints());
-  for (unsigned int i = 0; i < external_wrench_chain_.getNrOfJoints(); ++i) {
-    if (i >= joint_positions_.size()) {
-      break;
-    }
-    chain_q(i) = joint_positions_[i];
-    chain_q_dot(i) = q_dot(i);
-  }
-
-  KDL::Jacobian jacobian(external_wrench_chain_.getNrOfJoints());
-  if (external_wrench_jac_solver_->JntToJac(chain_q, jacobian) < 0) {
-    return ee_twist;
-  }
-
-  for (unsigned int row = 0; row < 6; ++row) {
-    double value = 0.0;
-    for (unsigned int col = 0; col < external_wrench_chain_.getNrOfJoints(); ++col) {
-      value += jacobian(row, col) * chain_q_dot(col);
-    }
-    ee_twist[row] = value;
-  }
-
-  return ee_twist;
 }
 
 controller_interface::CallbackReturn GravityCompensationController::on_error(

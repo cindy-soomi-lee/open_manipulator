@@ -58,7 +58,8 @@
       external_wrench_torque_scale: 1.0
       external_wrench_force_deadband: 0.1
       external_wrench_torque_deadband: 0.1
-      enable_force_feedback_telemetry: true
+      enable_controller_telemetry: true
+      controller_telemetry_topic: /omy/controller_telemetry
       # enable_spring_effect: false
 
 /**:
