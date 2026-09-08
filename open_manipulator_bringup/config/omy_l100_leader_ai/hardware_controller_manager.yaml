@@ -44,7 +44,7 @@
         - 0.8
         - 0.8
         - 1.0
-      enable_spring_effect: true
+      enable_spring_effect: false
       enable_external_wrench: true
       external_wrench_topic: /omy/external_wrench
       external_wrench_segment: link6
