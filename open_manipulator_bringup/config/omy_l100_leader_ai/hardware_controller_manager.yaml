@@ -31,22 +31,16 @@
         - position
         - velocity
       kinetic_friction_scalars:
-        - 0.1
-        - 0.1
-        - 0.1
-        # - 0.8
-        # - 0.8
-        # - 0.8
+        - 0.8
+        - 0.8
+        - 0.8
         - 0.1
         - 0.1
         - 0.1
       torque_scaling_factors:
-        # - 1.0
-        # - 1.0
-        # - 1.0
-        - 0.7
-        - 0.7
-        - 0.7
+        - 1.0
+        - 1.0
+        - 1.0
         - 0.8
         - 0.8
         - 1.0
@@ -60,7 +54,6 @@
       external_wrench_torque_deadband: 0.0
       enable_controller_telemetry: true
       controller_telemetry_topic: /omy/controller_telemetry
-      # enable_spring_effect: false
 
 /**:
   spring_actuator_controller:
