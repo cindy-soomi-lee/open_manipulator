@@ -28,7 +28,7 @@
 #include "controller_interface/controller_interface.hpp"
 #include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
-#include "omy_controller_interfaces/msg/omy_controller_telemetry.hpp"
+#include "teleop_interfaces/msg/omy_controller_telemetry.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
@@ -89,7 +89,7 @@ public:
     const rclcpp_lifecycle::State & previous_state) override;
 
 protected:
-  using ControllerTelemetry = omy_controller_interfaces::msg::OMYControllerTelemetry;
+  using ControllerTelemetry = teleop_interfaces::msg::OMYControllerTelemetry;
 
   struct ExternalWrenchSample
   {

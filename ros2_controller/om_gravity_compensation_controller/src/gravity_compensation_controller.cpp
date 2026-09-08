@@ -271,7 +271,9 @@ controller_interface::return_type GravityCompensationController::update(
         external_wrench_received && wrench_sample.has_msg_stamp ?
         ros_time_s - wrench_sample.msg_stamp_ros_time_s : nan_value;
 
-      msg.stamp = time.to_msg();
+      const auto stamp_ns = time.nanoseconds();
+      msg.stamp.sec = static_cast<int32_t>(stamp_ns / 1000000000);
+      msg.stamp.nanosec = static_cast<uint32_t>(stamp_ns % 1000000000);
       msg.controller_seq = controller_telemetry_seq_;
       msg.publish_missed_total = controller_telemetry_publish_missed_;
       msg.period_s = period.seconds();
