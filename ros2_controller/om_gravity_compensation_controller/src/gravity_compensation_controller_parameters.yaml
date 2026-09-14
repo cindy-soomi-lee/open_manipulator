@@ -97,7 +97,7 @@ gravity_compensation_controller:
   external_wrench_segment: {
     type: string,
     default_value: "link6",
-    description: "KDL segment name where external wrench is applied"
+    description: "Fallback KDL segment when WrenchStamped.header.frame_id is empty. Supported per-message targets are link6 and teleop_task."
   }
   external_wrench_force_scale: {
     type: double,
