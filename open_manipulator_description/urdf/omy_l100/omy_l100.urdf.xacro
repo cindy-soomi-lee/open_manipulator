@@ -22,6 +22,16 @@
   </joint>
 
   <xacro:omy_l100 prefix="$(arg prefix)" />
+
+  <!-- Fixed teleoperation endpoint at the gripper-joint origin. It remains
+       attached to link6 and therefore does not rotate with rh_r1_joint. -->
+  <link name="$(arg prefix)teleop_task"/>
+  <joint name="$(arg prefix)teleop_task_fixed" type="fixed">
+    <parent link="$(arg prefix)link6"/>
+    <child link="$(arg prefix)teleop_task"/>
+    <origin xyz="0 -0.125 -0.0255" rpy="0 0 0"/>
+  </joint>
+
   <xacro:omy_l100_gazebo prefix="$(arg prefix)" />
 
   <xacro:omy_l100_system
