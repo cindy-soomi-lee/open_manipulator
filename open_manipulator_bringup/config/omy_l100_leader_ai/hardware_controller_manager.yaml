@@ -47,6 +47,8 @@
       enable_spring_effect: false
       enable_external_wrench: true
       external_wrench_topic: /omy/external_wrench
+      external_wrench_link6_topic: /omy/external_wrench_link6
+      external_wrench_teleop_task_topic: /omy/external_wrench_teleop_task
       external_wrench_segment: link6
       external_wrench_force_scale: 1.0
       external_wrench_torque_scale: 1.0
