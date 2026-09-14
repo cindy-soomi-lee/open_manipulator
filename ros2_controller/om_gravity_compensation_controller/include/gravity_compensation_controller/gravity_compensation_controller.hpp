@@ -91,12 +91,20 @@ public:
 protected:
   using ControllerTelemetry = teleop_interfaces::msg::OMYControllerTelemetry;
 
+  enum class ExternalWrenchTarget : uint8_t
+  {
+    Configured = 0,
+    Link6 = 1,
+    TeleopTask = 2,
+  };
+
   struct ExternalWrenchSample
   {
     std::array<double, 6> wrench{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
     double received_ros_time_s{0.0};
     double msg_stamp_ros_time_s{0.0};
     bool has_msg_stamp{false};
+    ExternalWrenchTarget target{ExternalWrenchTarget::Configured};
   };
 
   std::string formatVector(const std::vector<double> & vec);
@@ -161,6 +169,8 @@ protected:
   std::atomic<bool> has_follower_data_{false};
   std::atomic<bool> has_external_wrench_data_{false};
   bool external_wrench_segment_valid_{false};
+  bool link6_segment_valid_{false};
+  bool teleop_task_segment_valid_{false};
 
   rclcpp::Publisher<ControllerTelemetry>::SharedPtr controller_telemetry_pub_;
   std::unique_ptr<realtime_tools::RealtimePublisher<ControllerTelemetry>>
