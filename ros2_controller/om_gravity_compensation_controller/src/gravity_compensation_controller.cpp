@@ -31,6 +31,8 @@ namespace gravity_compensation_controller
 namespace
 {
 constexpr double kExternalWrenchTimeoutS = 0.1;
+const std::string kLink6Segment = "link6";
+const std::string kTeleopTaskSegment = "teleop_task";
 
 double now_seconds(const rclcpp::Clock::SharedPtr & clock)
 {
@@ -119,44 +121,94 @@ controller_interface::return_type GravityCompensationController::update(
   }
 
   f_ext_.clear();
-  ExternalWrenchSample wrench_sample;
-  const bool external_wrench_received = has_external_wrench_data_.load();
+  ExternalWrenchSample telemetry_wrench_sample;
+  bool telemetry_wrench_sample_valid = false;
+  bool external_wrench_received = false;
   bool external_wrench_applied = false;
   std::array<double, 6> applied_wrench{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
 
-  if (params_.enable_external_wrench && external_wrench_segment_valid_ && external_wrench_received) {
+  // Apply one sample to one KDL segment. Dedicated link6 / teleop_task samples
+  // are processed after the legacy input, so a fresh dedicated channel wins if
+  // both paths target the same segment. Two different segment keys coexist in
+  // f_ext_ and are therefore handled in the same RNE solve.
+  auto apply_external_sample =
+    [&](const ExternalWrenchSample & sample, const std::string & segment, bool segment_valid) {
+      external_wrench_received = true;
+      if (
+        !telemetry_wrench_sample_valid ||
+        sample.received_ros_time_s >= telemetry_wrench_sample.received_ros_time_s)
+      {
+        telemetry_wrench_sample = sample;
+        telemetry_wrench_sample_valid = true;
+      }
+
+      const double wrench_age_s = ros_time_s - sample.received_ros_time_s;
+      if (
+        !segment_valid || wrench_age_s < 0.0 ||
+        wrench_age_s > kExternalWrenchTimeoutS)
+      {
+        return;
+      }
+
+      double fx = sample.wrench[0] * params_.external_wrench_force_scale;
+      double fy = sample.wrench[1] * params_.external_wrench_force_scale;
+      double fz = sample.wrench[2] * params_.external_wrench_force_scale;
+      double tx = sample.wrench[3] * params_.external_wrench_torque_scale;
+      double ty = sample.wrench[4] * params_.external_wrench_torque_scale;
+      double tz = sample.wrench[5] * params_.external_wrench_torque_scale;
+
+      if (std::abs(fx) < params_.external_wrench_force_deadband) {fx = 0.0;}
+      if (std::abs(fy) < params_.external_wrench_force_deadband) {fy = 0.0;}
+      if (std::abs(fz) < params_.external_wrench_force_deadband) {fz = 0.0;}
+      if (std::abs(tx) < params_.external_wrench_torque_deadband) {tx = 0.0;}
+      if (std::abs(ty) < params_.external_wrench_torque_deadband) {ty = 0.0;}
+      if (std::abs(tz) < params_.external_wrench_torque_deadband) {tz = 0.0;}
+
+      applied_wrench = {{fx, fy, fz, tx, ty, tz}};
+      f_ext_[segment] = KDL::Wrench(
+        KDL::Vector(fx, fy, fz), KDL::Vector(tx, ty, tz));
+      external_wrench_applied = true;
+    };
+
+  if (params_.enable_external_wrench && has_external_wrench_data_.load()) {
     auto wrench_ptr = external_wrench_buffer_.readFromRT();
     if (wrench_ptr) {
-      wrench_sample = *wrench_ptr;
-      const double wrench_age_s = ros_time_s - wrench_sample.received_ros_time_s;
-      if (wrench_age_s >= 0.0 && wrench_age_s <= kExternalWrenchTimeoutS) {
-        double fx = wrench_sample.wrench[0] * params_.external_wrench_force_scale;
-        double fy = wrench_sample.wrench[1] * params_.external_wrench_force_scale;
-        double fz = wrench_sample.wrench[2] * params_.external_wrench_force_scale;
-        double tx = wrench_sample.wrench[3] * params_.external_wrench_torque_scale;
-        double ty = wrench_sample.wrench[4] * params_.external_wrench_torque_scale;
-        double tz = wrench_sample.wrench[5] * params_.external_wrench_torque_scale;
-
-        if (std::abs(fx) < params_.external_wrench_force_deadband) {fx = 0.0;}
-        if (std::abs(fy) < params_.external_wrench_force_deadband) {fy = 0.0;}
-        if (std::abs(fz) < params_.external_wrench_force_deadband) {fz = 0.0;}
-        if (std::abs(tx) < params_.external_wrench_torque_deadband) {tx = 0.0;}
-        if (std::abs(ty) < params_.external_wrench_torque_deadband) {ty = 0.0;}
-        if (std::abs(tz) < params_.external_wrench_torque_deadband) {tz = 0.0;}
-
-        applied_wrench = {{fx, fy, fz, tx, ty, tz}};
-        f_ext_[params_.external_wrench_segment] = KDL::Wrench(
-          KDL::Vector(fx, fy, fz), KDL::Vector(tx, ty, tz));
-        external_wrench_applied = true;
+      const std::string * selected_segment = &params_.external_wrench_segment;
+      bool selected_segment_valid = external_wrench_segment_valid_;
+      switch (wrench_ptr->target) {
+        case ExternalWrenchTarget::Link6:
+          selected_segment = &kLink6Segment;
+          selected_segment_valid = link6_segment_valid_;
+          break;
+        case ExternalWrenchTarget::TeleopTask:
+          selected_segment = &kTeleopTaskSegment;
+          selected_segment_valid = teleop_task_segment_valid_;
+          break;
+        case ExternalWrenchTarget::Configured:
+        default:
+          break;
       }
+      apply_external_sample(*wrench_ptr, *selected_segment, selected_segment_valid);
+    }
+  }
+
+  if (params_.enable_external_wrench && has_external_wrench_link6_data_.load()) {
+    auto wrench_ptr = external_wrench_link6_buffer_.readFromRT();
+    if (wrench_ptr) {
+      apply_external_sample(*wrench_ptr, kLink6Segment, link6_segment_valid_);
+    }
+  }
+
+  if (params_.enable_external_wrench && has_external_wrench_teleop_task_data_.load()) {
+    auto wrench_ptr = external_wrench_teleop_task_buffer_.readFromRT();
+    if (wrench_ptr) {
+      apply_external_sample(*wrench_ptr, kTeleopTaskSegment, teleop_task_segment_valid_);
     }
   }
 
   // Compute the OMY compensation dynamics without the external wrench. When
   // reflection is active, a second RNE solve measures the exact joint-torque
-  // contribution of the existing KDL external-load path. This preserves the
-  // current wrench frame/sign convention while keeping reflection independent
-  // of the compensation calculation.
+  // contribution of every fresh KDL external-load entry in f_ext_.
   KDL::WrenchMap no_external_wrench;
   idsolver.CartToJnt(q, q_dot, q_ddot, no_external_wrench, torques);
 
@@ -270,11 +322,11 @@ controller_interface::return_type GravityCompensationController::update(
     if (controller_telemetry_rt_pub_->trylock()) {
       auto & msg = controller_telemetry_rt_pub_->msg_;
       const double nan_value = std::numeric_limits<double>::quiet_NaN();
-      const double receive_age_s = external_wrench_received ?
-        ros_time_s - wrench_sample.received_ros_time_s : nan_value;
+      const double receive_age_s = telemetry_wrench_sample_valid ?
+        ros_time_s - telemetry_wrench_sample.received_ros_time_s : nan_value;
       const double stamp_age_s =
-        external_wrench_received && wrench_sample.has_msg_stamp ?
-        ros_time_s - wrench_sample.msg_stamp_ros_time_s : nan_value;
+        telemetry_wrench_sample_valid && telemetry_wrench_sample.has_msg_stamp ?
+        ros_time_s - telemetry_wrench_sample.msg_stamp_ros_time_s : nan_value;
 
       const auto stamp_ns = time.nanoseconds();
       msg.stamp.sec = static_cast<int32_t>(stamp_ns / 1000000000);
@@ -288,17 +340,22 @@ controller_interface::return_type GravityCompensationController::update(
 
       msg.external_wrench_received = external_wrench_received;
       msg.external_wrench_fresh = external_wrench_applied;
-      msg.external_wrench_has_stamp = external_wrench_received && wrench_sample.has_msg_stamp;
-      msg.external_wrench_received_ros_time_s = external_wrench_received ?
-        wrench_sample.received_ros_time_s : nan_value;
+      msg.external_wrench_has_stamp =
+        telemetry_wrench_sample_valid && telemetry_wrench_sample.has_msg_stamp;
+      msg.external_wrench_received_ros_time_s = telemetry_wrench_sample_valid ?
+        telemetry_wrench_sample.received_ros_time_s : nan_value;
       msg.external_wrench_msg_stamp_ros_time_s =
-        external_wrench_received && wrench_sample.has_msg_stamp ?
-        wrench_sample.msg_stamp_ros_time_s : nan_value;
+        telemetry_wrench_sample_valid && telemetry_wrench_sample.has_msg_stamp ?
+        telemetry_wrench_sample.msg_stamp_ros_time_s : nan_value;
       msg.external_wrench_receive_age_s = receive_age_s;
       msg.external_wrench_stamp_age_s = stamp_age_s;
 
+      // The legacy telemetry message has only one wrench slot. For dual-channel
+      // phases it reports the most recently received channel while tau_reflect
+      // reports the combined KDL effect of all fresh entries in f_ext_.
       for (size_t i = 0; i < 6; ++i) {
-        msg.wrench_received[i] = external_wrench_received ? wrench_sample.wrench[i] : 0.0;
+        msg.wrench_received[i] =
+          telemetry_wrench_sample_valid ? telemetry_wrench_sample.wrench[i] : 0.0;
         msg.wrench_used[i] = applied_wrench[i];
       }
 
@@ -365,6 +422,11 @@ controller_interface::CallbackReturn GravityCompensationController::on_configure
   joint_name_to_index_.resize(joint_names_.size(), -1);
   tmp_positions_.resize(joint_names_.size(), 0.0);
   external_wrench_buffer_.writeFromNonRT(ExternalWrenchSample{});
+  external_wrench_link6_buffer_.writeFromNonRT(ExternalWrenchSample{});
+  external_wrench_teleop_task_buffer_.writeFromNonRT(ExternalWrenchSample{});
+  has_external_wrench_data_ = false;
+  has_external_wrench_link6_data_ = false;
+  has_external_wrench_teleop_task_data_ = false;
 
   tau_rne_.resize(n_joints_);
   tau_reflect_.resize(n_joints_);
@@ -418,9 +480,11 @@ controller_interface::CallbackReturn GravityCompensationController::on_configure
     });
 
   if (params_.enable_external_wrench) {
-    external_wrench_sub_ = get_node()->create_subscription<geometry_msgs::msg::WrenchStamped>(
-      params_.external_wrench_topic, rclcpp::QoS(10),
-      [this](const geometry_msgs::msg::WrenchStamped::SharedPtr msg) {
+    auto sample_from_msg =
+      [this](
+        const geometry_msgs::msg::WrenchStamped::SharedPtr & msg,
+        ExternalWrenchTarget target)
+      {
         ExternalWrenchSample sample;
         sample.wrench = {{
           msg->wrench.force.x,
@@ -438,8 +502,65 @@ controller_interface::CallbackReturn GravityCompensationController::on_configure
             static_cast<double>(msg->header.stamp.sec) +
             static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
         }
+        sample.target = target;
+        return sample;
+      };
+
+    // Legacy single input. frame_id can still select link6 or teleop_task.
+    external_wrench_sub_ = get_node()->create_subscription<geometry_msgs::msg::WrenchStamped>(
+      params_.external_wrench_topic, rclcpp::QoS(10),
+      [this, sample_from_msg](const geometry_msgs::msg::WrenchStamped::SharedPtr msg) {
+        auto sample = sample_from_msg(msg, ExternalWrenchTarget::Configured);
+        const auto & frame_id = msg->header.frame_id;
+        if (frame_id.empty() || frame_id == params_.external_wrench_segment) {
+          sample.target = ExternalWrenchTarget::Configured;
+        } else if (frame_id == kLink6Segment) {
+          sample.target = ExternalWrenchTarget::Link6;
+        } else if (frame_id == kTeleopTaskSegment) {
+          sample.target = ExternalWrenchTarget::TeleopTask;
+        } else {
+          RCLCPP_WARN(
+            get_node()->get_logger(),
+            "Ignoring external wrench with unsupported frame_id '%s'. Expected empty, '%s', "
+            "'link6', or 'teleop_task'.",
+            frame_id.c_str(), params_.external_wrench_segment.c_str());
+          return;
+        }
+
         external_wrench_buffer_.writeFromNonRT(sample);
         has_external_wrench_data_ = true;
+      });
+
+    external_wrench_link6_sub_ =
+      get_node()->create_subscription<geometry_msgs::msg::WrenchStamped>(
+      params_.external_wrench_link6_topic, rclcpp::QoS(10),
+      [this, sample_from_msg](const geometry_msgs::msg::WrenchStamped::SharedPtr msg) {
+        if (!msg->header.frame_id.empty() && msg->header.frame_id != kLink6Segment) {
+          RCLCPP_WARN(
+            get_node()->get_logger(),
+            "Ignoring dedicated link6 wrench with frame_id '%s'.",
+            msg->header.frame_id.c_str());
+          return;
+        }
+        auto sample = sample_from_msg(msg, ExternalWrenchTarget::Link6);
+        external_wrench_link6_buffer_.writeFromNonRT(sample);
+        has_external_wrench_link6_data_ = true;
+      });
+
+    external_wrench_teleop_task_sub_ =
+      get_node()->create_subscription<geometry_msgs::msg::WrenchStamped>(
+      params_.external_wrench_teleop_task_topic, rclcpp::QoS(10),
+      [this, sample_from_msg](const geometry_msgs::msg::WrenchStamped::SharedPtr msg) {
+        if (!msg->header.frame_id.empty() && msg->header.frame_id != kTeleopTaskSegment) {
+          RCLCPP_WARN(
+            get_node()->get_logger(),
+            "Ignoring dedicated teleop_task wrench with frame_id '%s'.",
+            msg->header.frame_id.c_str());
+          return;
+        }
+        auto sample = sample_from_msg(msg, ExternalWrenchTarget::TeleopTask);
+        external_wrench_teleop_task_buffer_.writeFromNonRT(sample);
+        has_external_wrench_teleop_task_data_ = true;
       });
   }
 
@@ -479,12 +600,36 @@ controller_interface::CallbackReturn GravityCompensationController::on_configure
 
     external_wrench_segment_valid_ =
       tree_.getSegments().find(params_.external_wrench_segment) != tree_.getSegments().end();
+    link6_segment_valid_ =
+      tree_.getSegments().find(kLink6Segment) != tree_.getSegments().end();
+    teleop_task_segment_valid_ =
+      tree_.getSegments().find(kTeleopTaskSegment) != tree_.getSegments().end();
+
     if (params_.enable_external_wrench && !external_wrench_segment_valid_) {
       RCLCPP_ERROR(
         get_node()->get_logger(),
         "external_wrench_segment '%s' is not in the parsed KDL tree.",
         params_.external_wrench_segment.c_str());
       return CallbackReturn::ERROR;
+    }
+    if (params_.enable_external_wrench && !link6_segment_valid_) {
+      RCLCPP_WARN(
+        get_node()->get_logger(),
+        "KDL segment 'link6' is unavailable; link6-targeted reflection messages will be ignored.");
+    }
+    if (params_.enable_external_wrench && !teleop_task_segment_valid_) {
+      RCLCPP_WARN(
+        get_node()->get_logger(),
+        "KDL segment 'teleop_task' is unavailable; teleop_task-targeted reflection messages will be ignored.");
+    }
+    if (params_.enable_external_wrench) {
+      RCLCPP_INFO(
+        get_node()->get_logger(),
+        "External wrench inputs: legacy='%s', link6='%s', teleop_task='%s'. "
+        "Fresh dedicated link6 and teleop_task loads are applied simultaneously.",
+        params_.external_wrench_topic.c_str(),
+        params_.external_wrench_link6_topic.c_str(),
+        params_.external_wrench_teleop_task_topic.c_str());
     }
 
   } else {
@@ -588,6 +733,12 @@ controller_interface::CallbackReturn GravityCompensationController::on_cleanup(
 
   tree_ = KDL::Tree();
   f_ext_.clear();
+  external_wrench_segment_valid_ = false;
+  link6_segment_valid_ = false;
+  teleop_task_segment_valid_ = false;
+  has_external_wrench_data_ = false;
+  has_external_wrench_link6_data_ = false;
+  has_external_wrench_teleop_task_data_ = false;
   controller_telemetry_rt_pub_.reset();
   controller_telemetry_pub_.reset();
 

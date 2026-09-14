@@ -1,0 +1,2 @@
+Phase 3.5 experimental snapshot: torque_scaling_factors = [1, 1, 1, 1, 1, 1].
+The canonical phase chain keeps Phase 4 inheriting directly from Phase 3 with [1, 1, 1, 0.8, 0.8, 1].

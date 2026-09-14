@@ -91,12 +91,20 @@ public:
 protected:
   using ControllerTelemetry = teleop_interfaces::msg::OMYControllerTelemetry;
 
+  enum class ExternalWrenchTarget : uint8_t
+  {
+    Configured = 0,
+    Link6 = 1,
+    TeleopTask = 2,
+  };
+
   struct ExternalWrenchSample
   {
     std::array<double, 6> wrench{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
     double received_ros_time_s{0.0};
     double msg_stamp_ros_time_s{0.0};
     bool has_msg_stamp{false};
+    ExternalWrenchTarget target{ExternalWrenchTarget::Configured};
   };
 
   std::string formatVector(const std::vector<double> & vec);
@@ -152,15 +160,28 @@ protected:
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr follower_joint_state_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr collision_flag_sub_;
+
+  // Legacy single input plus dedicated simultaneous link6 / teleop_task inputs.
   rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr external_wrench_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr external_wrench_link6_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr
+    external_wrench_teleop_task_sub_;
+
   realtime_tools::RealtimeBuffer<bool> collision_flag_buffer_;
   realtime_tools::RealtimeBuffer<ExternalWrenchSample> external_wrench_buffer_;
+  realtime_tools::RealtimeBuffer<ExternalWrenchSample> external_wrench_link6_buffer_;
+  realtime_tools::RealtimeBuffer<ExternalWrenchSample> external_wrench_teleop_task_buffer_;
+
   bool joint_index_initialized_ = false;
   std::vector<int> joint_name_to_index_;
   realtime_tools::RealtimeBuffer<std::vector<double>> follower_joint_positions_buffer_;
   std::atomic<bool> has_follower_data_{false};
   std::atomic<bool> has_external_wrench_data_{false};
+  std::atomic<bool> has_external_wrench_link6_data_{false};
+  std::atomic<bool> has_external_wrench_teleop_task_data_{false};
   bool external_wrench_segment_valid_{false};
+  bool link6_segment_valid_{false};
+  bool teleop_task_segment_valid_{false};
 
   rclcpp::Publisher<ControllerTelemetry>::SharedPtr controller_telemetry_pub_;
   std::unique_ptr<realtime_tools::RealtimePublisher<ControllerTelemetry>>
