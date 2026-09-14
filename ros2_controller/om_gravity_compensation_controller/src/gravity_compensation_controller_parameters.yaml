@@ -92,12 +92,22 @@ gravity_compensation_controller:
   external_wrench_topic: {
     type: string,
     default_value: "/omy/external_wrench",
-    description: "Topic for geometry_msgs/WrenchStamped used as external wrench input"
+    description: "Legacy single geometry_msgs/WrenchStamped input; frame_id selects the KDL segment"
+  }
+  external_wrench_link6_topic: {
+    type: string,
+    default_value: "/omy/external_wrench_link6",
+    description: "Dedicated geometry_msgs/WrenchStamped input applied at KDL segment link6"
+  }
+  external_wrench_teleop_task_topic: {
+    type: string,
+    default_value: "/omy/external_wrench_teleop_task",
+    description: "Dedicated geometry_msgs/WrenchStamped input applied at KDL segment teleop_task"
   }
   external_wrench_segment: {
     type: string,
     default_value: "link6",
-    description: "Fallback KDL segment when WrenchStamped.header.frame_id is empty. Supported per-message targets are link6 and teleop_task."
+    description: "Fallback KDL segment for the legacy external_wrench_topic when WrenchStamped.header.frame_id is empty."
   }
   external_wrench_force_scale: {
     type: double,
